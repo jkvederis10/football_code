@@ -1,0 +1,170 @@
+#load necessary libraries
+library(nflfastR)
+library(nflreadr)
+library(dplyr)
+
+
+###PULL LEAGUE AVERAGE VALUES ACROSS THE LAST 5 COMPLETE SEASONS
+
+#load pbp data
+pbp <- nflfastR::load_pbp(2017:2022) %>%
+  dplyr::filter(season_type == "REG") %>%
+  dplyr::filter(play_type != "no_play" & play_type != "qb_spike" & play_type != "qb_kneel" & !is.na(play_type))
+
+#remove garbage time
+pbp <- pbp[which(pbp$wp>=0.05 & pbp$wp<=0.95), ]
+
+#my play result classification (Interceptions, Fumbles, Penalties, Sacks, Fourth Downs, Special Teams, Normal)
+pbp$jk_class <- NA
+for(i in 1:nrow(pbp)){
+  if(pbp$penalty[i] == 1 & pbp$penalty_team[i] == pbp$posteam[i]) {
+    pbp$jk_class[i] <- "Offensive Penalty"
+  } else if(pbp$penalty[i] == 1 & pbp$penalty_team[i] == pbp$defteam[i]) {
+    pbp$jk_class[i] <- "Defensive Penalty"
+  } else if(pbp$sack[i] == 1){
+    pbp$jk_class[i] <- "Sack"
+  } else if(pbp$interception[i] == 1){
+    pbp$jk_class[i] <- "Interception"
+  } else if(pbp$fumble_lost[i] == 1){
+    pbp$jk_class[i] <- "Fumble Lost"
+  } else if(pbp$fourth_down_converted[i] == 1 | pbp$fourth_down_failed[i] == 1){
+    pbp$jk_class[i] <- "Fourth Down"
+  } else if(pbp$play_type[i] == "punt" | pbp$play_type[i] == "field_goal" | pbp$play_type[i] == "extra_point" | pbp$play_type[i] == "kickoff"){
+    pbp$jk_class[i] <- "Special Teams"
+  } else {
+    pbp$jk_class[i] <- "Normal"
+  }
+}
+
+
+#league average by play type
+lg_avg_offense <- pbp %>%
+  dplyr::filter(jk_class != "Special Teams") %>%
+  dplyr::group_by(play_type = jk_class) %>%
+  dplyr::summarise(off_epa = mean(epa, na.rm = TRUE))
+
+lg_avg_defense <- pbp %>%
+  dplyr::filter(jk_class != "Special Teams") %>%
+  dplyr::group_by(play_type = jk_class) %>%
+  dplyr::summarise(def_epa = mean(-epa, na.rm = TRUE))
+
+lg_avg <- lg_avg_offense %>%
+  dplyr::inner_join(lg_avg_defense, by = "play_type")
+  
+  
+  
+###PULL CURRENT YEAR EPA
+
+#load pbp data
+pbp <- nflfastR::load_pbp(2022) %>%
+  dplyr::filter(season_type == "REG") %>%
+  dplyr::filter(play_type != "no_play" & play_type != "qb_spike" & play_type != "qb_kneel" & !is.na(play_type))
+
+#remove garbage time
+pbp <- pbp[which(pbp$wp>=0.05 & pbp$wp<=0.95), ]
+
+#my play result classification (Interceptions, Fumbles, Penalties, Sacks, Fourth Downs, Special Teams, Normal)
+pbp$jk_class <- NA
+for(i in 1:nrow(pbp)){
+  if(pbp$penalty[i] == 1 & pbp$penalty_team[i] == pbp$posteam[i]) {
+    pbp$jk_class[i] <- "Offensive Penalty"
+  } else if(pbp$penalty[i] == 1 & pbp$penalty_team[i] == pbp$defteam[i]) {
+    pbp$jk_class[i] <- "Defensive Penalty"
+  } else if(pbp$sack[i] == 1){
+    pbp$jk_class[i] <- "Sack"
+  } else if(pbp$interception[i] == 1){
+    pbp$jk_class[i] <- "Interception"
+  } else if(pbp$fumble_lost[i] == 1){
+    pbp$jk_class[i] <- "Fumble Lost"
+  } else if(pbp$fourth_down_converted[i] == 1 | pbp$fourth_down_failed[i] == 1){
+    pbp$jk_class[i] <- "Fourth Down"
+  } else if(pbp$play_type[i] == "punt" | pbp$play_type[i] == "field_goal" | pbp$play_type[i] == "extra_point" | pbp$play_type[i] == "kickoff"){
+    pbp$jk_class[i] <- "Special Teams"
+  } else {
+    pbp$jk_class[i] <- "Normal"
+  }
+}
+
+
+#calculate epa averages by play type for offenses
+offense <- pbp %>%
+  dplyr::filter(jk_class != "Special Teams") %>%
+  dplyr::group_by(team = posteam, play_type = jk_class) %>%
+  dplyr::summarise(off_plays = n(), off_epa = mean(epa, na.rm = TRUE), off_epa_sum = sum(epa, na.rm = TRUE))
+
+#calculate epa averages by play type for defenses
+defense <- pbp %>%
+  dplyr::filter(jk_class != "Special Teams") %>%
+  dplyr::group_by(team = defteam, play_type = jk_class) %>%
+  dplyr::summarise(def_plays = n(), def_epa = mean(-epa, na.rm = TRUE), def_epa_sum = sum(-epa, na.rm = TRUE))
+
+#combine into one data frame
+teams <- offense %>%
+  dplyr::inner_join(defense, by = c("team", "play_type"))  
+
+
+
+###REGRESS CURRENT YEAR EPA BASED ON LG AVG VALUES FROM PAST 5 YEARS
+
+#calculate regressed team epas per play type
+teams$reg_off_epa_sum <- NA
+teams$reg_def_epa_sum <- NA
+for (i in 1:nrow(teams)) {
+  if(teams$play_type[i] == "Defensive Penalty"){
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[1]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[1]
+  } else if(teams$play_type[i] == "Fourth Down") {
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[2]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[2]
+  } else if(teams$play_type[i] == "Fumble Lost") {
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[3]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[3]
+  } else if(teams$play_type[i] == "Interception") {
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[4]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[4]
+  } else if(teams$play_type[i] == "Offensive Penalty") {
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[6]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[6]
+  } else if(teams$play_type[i] == "Sack") {
+    teams$reg_off_epa_sum[i] <- teams$off_plays[i]*lg_avg$off_epa[7]
+    teams$reg_def_epa_sum[i] <- teams$def_plays[i]*lg_avg$def_epa[7]
+  } else {
+    teams$reg_off_epa_sum[i] <- teams$off_epa_sum[i]
+    teams$reg_def_epa_sum[i] <- teams$def_epa_sum[i]
+  }
+}
+
+#get team totals vs regressed team totals
+reg_teams <- teams %>%
+  group_by(team) %>%
+  summarise(off_plays = sum(off_plays), off_epa_sum = sum(off_epa_sum), reg_off_epa_sum = sum(reg_off_epa_sum), def_plays = sum(def_plays), def_epa_sum = sum(def_epa_sum), reg_def_epa_sum = sum(reg_def_epa_sum))
+
+#add in per play metrics
+reg_teams$off_epa <- round(reg_teams$off_epa_sum/reg_teams$off_plays,3)
+reg_teams$reg_off_epa <- round(reg_teams$reg_off_epa_sum/reg_teams$off_plays,3)
+reg_teams$off_epa_diff <- round(reg_teams$off_epa - reg_teams$reg_off_epa,3)
+reg_teams$def_epa <- round(reg_teams$def_epa_sum/reg_teams$def_plays,3)
+reg_teams$reg_def_epa <- round(reg_teams$reg_def_epa_sum/reg_teams$def_plays,3)
+reg_teams$def_epa_diff <- round(reg_teams$def_epa - reg_teams$reg_def_epa,3)
+reg_teams$epa <- round((reg_teams$off_epa*0.6) + (reg_teams$def_epa*0.4),3)
+reg_teams$reg_epa <- round((reg_teams$reg_off_epa*0.6) + (reg_teams$reg_def_epa*0.4),3)
+reg_teams$epa_diff <- round(reg_teams$epa - reg_teams$reg_epa,3)
+
+
+
+#Opponent Adjustments
+reg_teams$avg_opp_def_epa <- NA
+reg_teams$avg_opp_off_epa <- NA
+reg_teams$avg_opp_epa <- NA
+for (i in 1:nrow(reg_teams)) {
+  opponents <- unique(pbp$defteam[which(pbp$posteam == reg_teams$team[i])])
+  reg_teams$avg_opp_def_epa[i] <- -round(mean(reg_teams$reg_def_epa[which(reg_teams$team %in% opponents)]),3)
+  reg_teams$avg_opp_off_epa[i] <- -round(mean(reg_teams$reg_off_epa[which(reg_teams$team %in% opponents)]),3)
+  reg_teams$avg_opp_epa[i] <- -round(mean(reg_teams$reg_epa[which(reg_teams$team %in% opponents)]),3)
+}
+reg_teams$off_epa_opp_diff <- reg_teams$reg_off_epa - reg_teams$avg_opp_def_epa
+reg_teams$def_epa_opp_diff <- reg_teams$reg_def_epa - reg_teams$avg_opp_off_epa
+reg_teams$epa_opp_diff <- reg_teams$reg_epa - reg_teams$avg_opp_epa
+
+#View leaderboard of teams with regressed and opponent adjusted numbers
+View(reg_teams[,c(1,20:22)])
